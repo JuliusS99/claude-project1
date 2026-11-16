@@ -22,3 +22,18 @@ Eigenes, editierbares Modell einer Schleuder im Kreditkartenformat (54 × 85,6 m
 
 ## Druck
 Flach liegend drucken, 100 % Infill oder ≥ 5 Wände, PETG oder PA-CF statt PLA. Mit leichten Bändern anfangen. Nie auf Menschen oder Tiere zielen.
+
+---
+
+# Moshu Card Slingshot – Designs
+
+Farb- und Haptik-Designs für die [Moshu Card-Style Slingshot](https://makerworld.com/de/models/3087259) (Original-Geometrie vom Designer, **nicht** in diesem Repo).
+
+1. Die 3MF bei MakerWorld herunterladen.
+2. `python3 moshu/tools/extract_3mf.py <datei>.3mf moshu/parts` (benötigt `numpy`). Das erzeugt die einzelnen STLs, die lokal bleiben.
+3. Konzeptblatt: `python3 moshu/tools/designs.py sheet moshu/designs/concepts.png` (benötigt `trimesh shapely scipy matplotlib`).
+
+![Konzepte](moshu/designs/concepts.png)
+
+Teile: `frame` (Rahmen), `grip` (Griff mit Kugelkanal), `slider` (Schlitten/Abzug), `spring` (Druckfeder), `cover_plate`, `nut_plate` (2× M3-Mutter), `screw_plate` (2× M3-Senkkopf), `knob` (Knopf mit Öse).
+Original-Druckprofil: Bambu Lab A1, 0,2 mm, 3 Wände, 40 % Infill, ohne Stützen.
