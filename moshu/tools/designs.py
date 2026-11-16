@@ -1,10 +1,15 @@
-"""Colour/texture designs for the Moshu card slingshot.
+"""Bite designs for the Moshu card slingshot.
 
-Every design is 2D art drawn on the OUTER face of a part (the face that lies on the
-print bed). Coordinates are in "outside view": x is mirrored so text reads correctly
-when you look at the finished part.
+The grip hangs on a 12.2 mm link (nut_plate/screw_plate) from frame pivot A=(28, 6).
+Folded, it fills the free corner of the frame (card). Unfolding swings it around the link
+pivot B near the bottom, so the frame/grip seam opens like a jaw: hinge at the bottom,
+mouth at the top. Teeth are added to the frame edge; matching sockets are cut into the
+grip, swept along the opening motion so nothing can jam.
 
-    python3 -I moshu/tools/designs.py sheet out.png    # concept sheet of all designs
+All geometry is in part coordinates (print orientation, outer face on the bed) and in the
+"card pose" (grip folded). Drawings are mirrored to show the outside.
+
+    python3 -I moshu/tools/designs.py sheet out.png
 """
 import random
 import sys
@@ -14,236 +19,214 @@ from pathlib import Path
 import numpy as np
 import trimesh
 from shapely import affinity
-from shapely.geometry import LineString, MultiLineString, Point, Polygon, box
+from shapely.geometry import LineString, Point, Polygon, box
 from shapely.ops import unary_union
 
 PARTS = Path(__file__).resolve().parent.parent / 'parts'
-FACE_Z = {'frame': 0.7, 'grip': 0.7}  # just above the 0.5 mm edge fillet
+A, LINK, GB = np.array([28.0, 6.0]), 12.2, (28.0, 69.0)  # frame pivot, link length, grip pivot (grip coords)
+MOUTH_X, MOUTH_Y = 34.0, (14.0, 54.0)                      # straight part of the seam that gets teeth
+OPEN_PATH = np.linspace(180, 140, 21)                       # grip angle while unfolding (link at 0 deg)
 
 
-def face(part):
-    """Outer-face outline of a part, mirrored into outside view."""
+def _slice(m, z):
+    p, _ = m.section(plane_origin=[0, 0, z], plane_normal=[0, 0, 1]).to_2D(to_2D=np.eye(4))
+    return unary_union(p.polygons_full)
+
+
+def load(part, skin=2.0):
+    """Outer-face outline and the zone where >= `skin` mm of solid material is behind the face."""
     m = trimesh.load(PARTS / f'{part}.stl')
-    p, _ = m.section(plane_origin=[0, 0, FACE_Z[part]], plane_normal=[0, 0, 1]).to_2D(to_2D=np.eye(4))
-    g = unary_union(p.polygons_full)
-    return affinity.scale(g, -1, 1, origin=(m.extents[0] / 2, 0))
+    outline = _slice(m, 0.7)
+    solid = outline
+    for z in np.arange(0.9, skin + 0.01, 0.2):
+        solid = solid.intersection(_slice(m, z))
+    return outline, solid.buffer(-1.0)
 
 
-# ---------- pattern helpers (all return shapely geometry) ----------
+def grip_pose(g, phi=0.0, psi=180.0):
+    B = A + LINK * np.array([cos(np.radians(phi)), sin(np.radians(phi))])
+    return affinity.translate(affinity.rotate(g, psi, origin=GB), B[0] - GB[0], B[1] - GB[1])
+
+
+def grip_unpose(g, phi=0.0, psi=180.0):
+    B = A + LINK * np.array([cos(np.radians(phi)), sin(np.radians(phi))])
+    return affinity.rotate(affinity.translate(g, GB[0] - B[0], GB[1] - B[1]), -psi, origin=GB)
+
+
+# ---------- teeth (frame side, card coords) ----------
+def teeth(style, rng):
+    y0, y1 = MOUTH_Y
+    x = MOUTH_X - 0.6  # root overlaps the frame edge
+    out = []
+    if style == 'square':
+        for y in np.arange(y0, y1 - 3, 7.0):
+            out.append(box(x, y, MOUTH_X + 3.5, y + 3.5))
+        return out
+    pitch, h, w = {'fang': (5.7, 4.2, 5.0), 'serrated': (3.4, 2.6, 3.2), 'saw': (6.6, 4.6, 6.4),
+                   'mimic': (5.0, 4.0, 4.6), 'cilia': (4.0, 5.2, 1.5)}[style]
+    for y in np.arange(y0, y1 - w + 0.01, pitch):
+        hh, ww = h, w
+        if style == 'mimic':
+            hh, ww = rng.uniform(2.2, 4.6), rng.uniform(3.2, 4.8)
+        if style == 'fang' and len(out) in (1, 5):
+            hh = h * 1.25  # two canines
+        tip = (MOUTH_X + hh, y + ww / 2)
+        if style == 'cilia':  # thin spike with rounded tip
+            out.append(unary_union([Polygon([(x, y), tip, (x, y + ww)]), Point(tip).buffer(0.45)]))
+        elif style == 'serrated':
+            out.append(Polygon([(x, y), (MOUTH_X + 0.3, y), tip, (MOUTH_X + 0.3, y + ww), (x, y + ww)]))
+        else:
+            out.append(Polygon([(x, y), tip, (x, y + ww)]))
+    return out
+
+
+def build_shapes(style, rng):
+    frame, frame_safe = load('frame')
+    grip, grip_safe = load('grip')
+    T = unary_union(teeth(style, rng))
+    sockets = unary_union([grip_unpose(T, 0, psi) for psi in OPEN_PATH]).buffer(0.3)  # grip coords
+    grip_new = grip.difference(sockets)
+    return {'frame': frame.union(T), 'frame_safe': frame_safe, 'teeth': T,
+            'grip': grip_new, 'grip_safe': grip_safe.intersection(grip_new.buffer(-1.0)),
+            'grip_teeth': grip_pose(grip_new).intersection(box(MOUTH_X, MOUTH_Y[0] - 2, MOUTH_X + 5, MOUTH_Y[1] + 2))}
+
+
+# ---------- art helpers ----------
 def lines(pts_list, w):
-    return unary_union([LineString(p).buffer(w / 2, cap_style='round') for p in pts_list])
+    return unary_union([LineString(p).buffer(w / 2) for p in pts_list])
 
 
 def ring(c, r, w):
     return Point(c).buffer(r + w / 2).difference(Point(c).buffer(r - w / 2))
 
 
-def circuit(area, rng, w=0.7, step=3.0, n=26):
-    """Random PCB traces with round pads."""
-    minx, miny, maxx, maxy = area.bounds
-    paths, pads = [], []
-    for _ in range(n):
-        x, y = rng.uniform(minx, maxx), rng.uniform(miny, maxy)
-        if not area.contains(Point(x, y)):
-            continue
-        pts, d = [(x, y)], rng.choice([(0, 1), (1, 0), (0, -1), (-1, 0)])
-        for _ in range(rng.randint(3, 9)):
-            if rng.random() < 0.35:  # 45 degree bend
-                d = rng.choice([(d[0] + d[1], d[1] - d[0]), (d[0] - d[1], d[1] + d[0])])
-                d = (np.sign(d[0]), np.sign(d[1]))
-            x, y = x + d[0] * step, y + d[1] * step
-            pts.append((x, y))
-        paths.append(pts)
-        pads += [Point(pts[0]).buffer(1.1), Point(pts[-1]).buffer(1.1)]
-    return unary_union([lines(paths, w)] + pads)
+def wave(x0, x1, y, amp, n, w):
+    t = np.linspace(x0, x1, 120)
+    return LineString(np.c_[t, y + amp * np.sin((t - x0) / (x1 - x0) * n * 2 * pi)]).buffer(w / 2)
 
 
-def hexgrid(area, r=2.6, w=0.7):
-    minx, miny, maxx, maxy = area.bounds
-    cells, dx, dy = [], r * 1.5, r * 3 ** 0.5
-    for i in range(int((maxx - minx) / dx) + 3):
-        for j in range(int((maxy - miny) / dy) + 3):
-            cx, cy = minx + i * dx, miny + j * dy + (dy / 2 if i % 2 else 0)
-            hexa = [(cx + r * cos(k * pi / 3), cy + r * sin(k * pi / 3)) for k in range(7)]
-            cells.append(LineString(hexa).buffer(w / 2))
-    return unary_union(cells)
-
-
-def voronoi(area, rng, n=40, w=0.8):
+def voronoi(area, rng, n, w):
     from scipy.spatial import Voronoi
     minx, miny, maxx, maxy = area.bounds
-    pts = np.array([[rng.uniform(minx - 5, maxx + 5), rng.uniform(miny - 5, maxy + 5)] for _ in range(n)])
-    v = Voronoi(pts)
-    segs = [v.vertices[r] for r in v.ridge_vertices if -1 not in r]
-    return lines(segs, w)
+    v = Voronoi(np.array([[rng.uniform(minx - 5, maxx + 5), rng.uniform(miny - 5, maxy + 5)] for _ in range(n)]))
+    return lines([v.vertices[r] for r in v.ridge_vertices if -1 not in r], w)
 
 
-def scales(area, r=3.2, w=0.6):
+def slit_eye(c, r, iris):
+    pupil = affinity.scale(Point(0, 0).buffer(1), r * 0.16, r * 0.62)
+    return affinity.translate(Point(0, 0).buffer(r).difference(pupil), *c)
+
+
+def dots(area, rng, n, r):
     minx, miny, maxx, maxy = area.bounds
-    arcs = []
-    for j, y in enumerate(np.arange(maxy + r, miny - r, -r * 0.9)):
-        for x in np.arange(minx - r, maxx + r, r * 1.6):
-            cx = x + (r * 0.8 if j % 2 else 0)
-            a = np.linspace(pi, 2 * pi, 18)  # lower half circle: scales point down
-            arcs.append(np.c_[cx + r * np.cos(a), y + r * np.sin(a)])
-    return lines(arcs, w)
+    return unary_union([Point(rng.uniform(minx, maxx), rng.uniform(miny, maxy)).buffer(rng.uniform(*r)) for _ in range(n)])
 
 
-def stripes(area, pitch=4.0, angle=45):
-    minx, miny, maxx, maxy = area.bounds
-    L = (maxx - minx) + (maxy - miny)
-    bands = [box(minx + k, miny - L, minx + k + pitch / 2, maxy + L) for k in np.arange(-L, L, pitch)]
-    return affinity.rotate(unary_union(bands), angle, origin=area.centroid)
+KNOB = (63.3, 79.5)  # band post hole in the frame head - becomes the eye
+BALLS = [(45.9, 53.7), (45.9, 43.7), (45.9, 33.7)]  # ammo holes in card pose
 
 
-def runes(origin, n, rng, size=3.2, gap=1.4, w=0.45, vertical=True):
-    """Simple angular glyphs made from strokes between a 2x3 node grid."""
-    nodes = [(x, y) for y in (0, 0.5, 1) for x in (0, 0.6)]
-    out = []
-    for k in range(n):
-        strokes = [rng.sample(nodes, 2) for _ in range(rng.randint(2, 4))]
-        ox, oy = origin
-        if vertical:
-            oy -= k * (size + gap)
-        else:
-            ox += k * (size * 0.6 + gap)
-        out += [[(ox + a[0] * size, oy - a[1] * size), (ox + b[0] * size, oy - b[1] * size)] for a, b in strokes]
-    return lines(out, w)
+# ---------- designs: art in card coords; None colour = tactile groove ----------
+def maw(s, rng):
+    gums = box(38.6, 11, 42.6, 57)
+    return {'frame': [('#ffcc00', ring(KNOB, 5.6, 2.6)), ('#7a0c14', voronoi(box(34, 75, 68, 106), rng, 14, 0.7)),
+                      ('#efe6d2', s['teeth'])],
+            'grip': [('#a4161a', gums), ('#efe6d2', s['grip_teeth']),
+                     (None, unary_union([wave(36, 66, y, 1.2, 3, 0.8) for y in range(10, 70, 6)]))]}
 
 
-def vine(p0, p1, rng, amp=3.0, waves=4, leaf=2.2, w=0.7):
-    t = np.linspace(0, 1, 200)
-    d = np.subtract(p1, p0)
-    nrm = np.array([-d[1], d[0]]) / np.hypot(*d)
-    pts = np.array(p0) + np.outer(t, d) + np.outer(amp * np.sin(t * waves * 2 * pi), nrm)
-    leaves = []
-    for k, i in enumerate(range(12, 200, 18)):
-        tang = pts[min(i + 1, 199)] - pts[i - 1]
-        ang = np.degrees(np.arctan2(tang[1], tang[0])) + (50 if k % 2 else -50)
-        e = affinity.scale(Point(0, 0).buffer(1), leaf, leaf * 0.4)
-        e = affinity.translate(affinity.rotate(e, ang, origin=(0, 0)), *pts[i])
-        leaves.append(affinity.translate(e, *(0.9 * leaf * np.array([cos(np.radians(ang)), sin(np.radians(ang))]))))
-    return unary_union([LineString(pts).buffer(w / 2)] + leaves)
+def megalodon(s, rng):
+    gills = lines([[(14 + k * 4.5, 9), (16.5 + k * 4.5, 18), (14 + k * 4.5, 27)] for k in range(4)], 1.0)
+    return {'frame': [('#efefef', s['teeth']), (None, gills), ('#0a0a0a', Point(55, 93).buffer(3.2)),
+                      ('#ffffff', Point(54, 94.2).buffer(0.9)), (None, lines([[(40, 100), (47, 97)], [(41, 103), (49, 99.5)]], 0.7))],
+            'grip': [(None, lines([[(37, 64), (48, 70)], [(37, 60), (50, 67)]], 0.7))]}
 
 
-def stars(area, rng, n=45):
-    minx, miny, maxx, maxy = area.bounds
-    out = []
-    for _ in range(n):
-        c = (rng.uniform(minx, maxx), rng.uniform(miny, maxy))
-        s = rng.choice([0.45, 0.45, 0.6, 0.8, 1.6])
-        if s > 1:  # four point star
-            pts = [(c[0] + (s if k % 2 == 0 else s * 0.3) * cos(k * pi / 4), c[1] + (s if k % 2 == 0 else s * 0.3) * sin(k * pi / 4)) for k in range(8)]
-            out.append(Polygon(pts))
-        else:
-            out.append(Point(c).buffer(s))
-    return unary_union(out)
+def mimic(s, rng):
+    planks = unary_union([box(-5, y, 75, y + 0.8) for y in range(4, 106, 8)])
+    keyhole = unary_union([Point(51, 89).buffer(1.7), box(50.3, 83.5, 51.7, 89)])
+    tongue = unary_union([LineString([(35, 20), (38, 30), (36.5, 40), (39.5, 48)]).buffer(2.4)])
+    return {'frame': [(None, planks), ('#d4af37', box(44, 81, 58, 97).difference(keyhole)),
+                      ('#d4af37', unary_union([box(22, 57, 26, 106), box(28, 0, 32, 30)])), ('#efe6d2', s['teeth'])],
+            'grip': [(None, planks), ('#e75480', tongue), ('#efe6d2', s['grip_teeth']), ('#d4af37', box(34, 62, 68, 66))]}
 
 
-def sigil(c, r, w=0.6, k=7):
-    """Magic circle: two rings, a k-pointed star polygon and tick marks."""
-    pts = [(c[0] + r * 0.82 * sin(2 * pi * i / k), c[1] + r * 0.82 * cos(2 * pi * i / k)) for i in range(k)]
-    star = [pts[(i * 3) % k] for i in range(k + 1)]
-    ticks = [[(c[0] + r * 0.9 * sin(a), c[1] + r * 0.9 * cos(a)), (c[0] + r * 1.0 * sin(a), c[1] + r * 1.0 * cos(a))]
-             for a in np.linspace(0, 2 * pi, 36, endpoint=False)]
-    return unary_union([ring(c, r, w), ring(c, r * 0.82, w * 0.8), lines([star], w * 0.8), lines(ticks, w * 0.5)])
+def flytrap(s, rng):
+    inside = unary_union([box(34, 8, 43, 60), box(24, 6, 34, 30)])
+    veins = lines([[(34, y), (34 + 12 * cos(a), y + 12 * sin(a))] for y in range(12, 58, 7) for a in (-0.4, 0, 0.4)]
+                  + [[(34, y), (34 - 10, y + d)] for y, d in ((10, -3), (18, 0), (26, 3))], 0.6)
+    return {'frame': [('#c1121f', box(24, 6, 34, 30)), ('#d9ed92', s['teeth']),
+                      ('#80b918', voronoi(box(34, 75, 68, 106), rng, 10, 0.6)), (None, veins)],
+            'grip': [('#c1121f', box(34, 8, 43, 60)), ('#80b918', veins), ('#e0fbfc', dots(inside, rng, 10, (0.5, 0.9)))]}
 
 
-def text(s, xy, size, angle=0):
-    from matplotlib.font_manager import FontProperties
-    from matplotlib.textpath import TextPath
-    tp = TextPath((0, 0), s, size=size, prop=FontProperties(family='DejaVu Sans', weight='bold'))
-    g = Polygon()
-    for poly in tp.to_polygons():
-        if len(poly) > 2:
-            g = g.symmetric_difference(Polygon(poly))
-    return affinity.translate(affinity.rotate(g, angle, origin=(0, 0)), *xy)
+def croc9(s, rng):
+    scutes = unary_union([box(-5, y, 75, y + 0.7) for y in range(3, 106, 7)] + [box(x, -5, x + 0.7, 110) for x in range(5, 70, 8)])
+    piston = lines([[(13, 12), (31, 12)], [(13, 22), (31, 22)], [(13, 12), (13, 22)], [(31, 17), (33, 17)]], 0.8)
+    return {'frame': [(None, scutes.intersection(box(34, 75, 68, 106))), ('#ff2a2a', slit_eye(KNOB, 6.5, True)),
+                      ('#c9d1d9', s['teeth']), (None, piston),
+                      ('#ff7a00', box(36, 99, 66, 105).difference(unary_union([box(36 + k, 98, 38 + k, 106) for k in range(0, 30, 4)])))],
+            'grip': [(None, scutes), ('#c9d1d9', s['grip_teeth'])]}
 
 
-def eye(c, r):
-    """Dragon eye: almond with slit pupil (pupil is left as base colour)."""
-    almond = Point(0, r * 0.75).buffer(r).intersection(Point(0, -r * 0.75).buffer(r))
-    almond = affinity.rotate(almond, 90, origin=(0, 0))
-    pupil = affinity.scale(Point(0, 0).buffer(1), r * 0.12, r * 0.55)
-    return affinity.translate(almond.difference(pupil), *c)
+def beartrap(s, rng):
+    chain = unary_union([ring((12 + (k % 2) * 0, 12 + k * 4.5), 2.2, 0.8) for k in range(4)])
+    hazard = box(34, 60, 68, 66)
+    rivets = unary_union([Point(p).buffer(1.1) for p in ((38, 79), (66, 79), (38, 102), (66, 102))])
+    return {'frame': [('#b8c1c8', s['teeth']), (None, chain), ('#b8c1c8', rivets),
+                      ('#8a3b12', dots(box(34, 75, 68, 106), rng, 12, (0.4, 1.0)))],
+            'grip': [('#b8c1c8', s['grip_teeth']), ('#ffd000', hazard.difference(unary_union([box(34 + k, 58, 36 + k, 68) for k in range(0, 34, 4)]))),
+                     (None, ring((40.2, 6), 4.5, 0.8))]}
 
 
-# ---------- designs ----------
-# Each design returns {'frame': [(colour, geom), ...], 'grip': [...]} in outside view.
-# A colour of None means a tactile groove (recessed, base colour).
-def neon_circuit(f, g, rng):
-    label = text('N30N', (36, 18), 5.5)
-    return {'frame': [('#39ff14', circuit(f, rng, n=70).difference(label.buffer(1.5))), ('#00e5ff', label)],
-            'grip': [(None, hexgrid(g)), ('#39ff14', circuit(g, rng, n=10))]}
-
-
-def titan_mech(f, g, rng):
-    panels = lines([[(33, 62), (68, 62)], [(26, 75), (26, 106)], [(48, 0), (48, 30)], [(0, 88), (26, 88)]], 0.8)
-    plate = box(0, 97, 24, 106)
-    return {'frame': [(None, panels), ('#ff7a00', plate.difference(stripes(plate, 5))),
-                      ('#ff7a00', text('TX-07', (35, 21), 4.5))],
-            'grip': [(None, stripes(g, 3.0, 30).intersection(box(0, 0, 34, 50))), ('#ff7a00', box(0, 62, 34, 66))]}
-
-
-def xeno_biotech(f, g, rng):
-    core = unary_union([Point(15, 90).buffer(3), ring((15, 90), 5.5, 0.9), ring((15, 90), 8, 0.6)])
-    return {'frame': [('#9dff00', voronoi(f, rng, 55, 0.9).difference(Point(15, 90).buffer(9))), ('#ff2bd6', core)],
-            'grip': [(None, voronoi(g, rng, 25, 0.8))]}
-
-
-def elven_warden(f, g, rng):
-    return {'frame': [('#d4af37', vine((7, 101), (30, 68), rng, amp=2.5, waves=2.5)),
-                      ('#d4af37', vine((36, 16), (56, 16), rng, amp=2.0, waves=2, leaf=1.8)),
-                      ('#d4af37', runes((63.1, 101), 20, rng, size=3.0))],
-            'grip': [(None, scales(g, 3.0)), ('#d4af37', runes((26, 72), 12, rng))]}
-
-
-def dragonscale(f, g, rng):
-    claws = lines([[(36 + k * 4, 26), (42 + k * 4, 12)] for k in range(3)], 1.2)
-    return {'frame': [('#a4161a', scales(f, 3.6, 1.1).intersection(box(33, 0, 68, 58)).difference(claws.buffer(0.8))),
-                      ('#d4af37', eye((17, 91), 8)), ('#d4af37', ring((17, 91), 9, 0.8)), ('#d4af37', claws)],
-            'grip': [(None, scales(g, 3.2)), ('#a4161a', box(0, 66, 34, 75))]}
-
-
-def astral_sigil(f, g, rng):
-    return {'frame': [('#e8f6ff', stars(f, rng, 60).difference(Point(17, 91).buffer(12.5))), ('#ffd166', sigil((17, 91), 11.5))],
-            'grip': [('#e8f6ff', stars(g, rng, 18).difference(Point(8.5, 56).buffer(6.5))), ('#ffd166', sigil((8.5, 56), 5.8, k=5))]}
-
-
-DESIGNS = {  # name: (function, base colour, short description)
-    'NEON CIRCUIT': (neon_circuit, '#141414', 'Cyberpunk: Leiterbahnen in Neon'),
-    'TITAN MECH': (titan_mech, '#5b6168', 'Military Sci-Fi: Panzerplatten + Warnstreifen'),
-    'XENO BIOTECH': (xeno_biotech, '#2d1b3d', 'Alien: lebende Zellstruktur'),
-    'ELVEN WARDEN': (elven_warden, '#2f5d3a', 'High Fantasy: Ranken + Runen'),
-    'DRAGONSCALE': (dragonscale, '#151515', 'Dark Fantasy: Drachenschuppen + Auge'),
-    'ASTRAL SIGIL': (astral_sigil, '#0b1a3a', 'Sci-Fi x Magie: Sternkarte + Siegel'),
+DESIGNS = {  # name: (art fn, tooth style, (frame, grip, knob) base colours, one-liner)
+    'MAW': (maw, 'fang', ('#1d1b1b', '#1d1b1b', '#9dff00'), 'Horror-Monster: Fangzähne, Zahnfleisch, Glow-Auge'),
+    'MEGALODON': (megalodon, 'serrated', ('#65737e', '#f2f2f2', '#0a0a0a'), 'Hai: Sägezähne, weißer Bauch, fühlbare Kiemen'),
+    'MIMIC': (mimic, 'mimic', ('#6b4226', '#6b4226', '#d4af37'), 'D&D-Truhe: Planken, Goldschloss, Zunge'),
+    'FLYTRAP': (flytrap, 'cilia', ('#2f6b2a', '#2f6b2a', '#c1121f'), 'Venusfalle: Wimpern-Stacheln, roter Kelch'),
+    'CROC-9': (croc9, 'square', ('#3d4349', '#3d4349', '#ff2a2a'), 'Mecha-Kroko: Zinnenzähne, Panzer, LED-Auge'),
+    'BEAR TRAP': (beartrap, 'saw', ('#2b2b2b', '#2b2b2b', '#b8c1c8'), 'Tellereisen: Stahlzähne, Kette, Warnstreifen'),
 }
 
 
-def render(name, ax, seed=7):
+def art(name, seed=3):
+    fn, style, base, desc = DESIGNS[name]
+    rng = random.Random(seed)
+    s = build_shapes(style, rng)
+    a = fn(s, rng)
+    gsafe = grip_pose(s['grip_safe'])
+    clip = {'frame': lambda g, c: g.intersection(s['frame_safe'].union(s['teeth']) if c else s['frame_safe']),
+            'grip': lambda g, c: g.intersection(gsafe.union(s['grip_teeth']) if c else gsafe)}
+    return s, base, desc, {p: [(c, clip[p](g, c)) for c, g in a[p]] for p in a}
+
+
+def render(name, axs):
     from matplotlib.patches import PathPatch
     from matplotlib.path import Path as MPath
-    fn, base, desc = DESIGNS[name]
-    f, g = face('frame'), face('grip')
-    safe = {'frame': f.buffer(-1.2), 'grip': g.buffer(-1.2)}  # keep art off edges and holes
-    art = fn(safe['frame'], safe['grip'], random.Random(seed))
+    s, base, desc, a = art(name)
 
-    def draw(geom, color, dx, **kw):
+    def draw(ax, geom, color, alpha=1.0, edge='none'):
+        geom = affinity.scale(geom, -1, 1, origin=(34, 0))  # outside view
         for poly in getattr(geom, 'geoms', [geom]):
             if poly.is_empty or poly.geom_type != 'Polygon':
                 continue
             rings = [poly.exterior] + list(poly.interiors)
-            verts = np.concatenate([np.asarray(r.coords) + [dx, 0] for r in rings])
+            verts = np.concatenate([np.asarray(r.coords) for r in rings])
             codes = np.concatenate([[MPath.MOVETO] + [MPath.LINETO] * (len(r.coords) - 2) + [MPath.CLOSEPOLY] for r in rings])
-            ax.add_patch(PathPatch(MPath(verts, codes), facecolor=color, edgecolor='none', **kw))
+            ax.add_patch(PathPatch(MPath(verts, codes), facecolor=color, edgecolor=edge, lw=0.6, alpha=alpha))
 
-    for part, geom, dx in (('frame', f, 0), ('grip', g, 76)):
-        draw(geom, base, dx)
-        for color, a in art[part]:
-            a = a.intersection(safe[part])
-            draw(a, color or '#000000', dx, alpha=1 if color else 0.55)
-    ax.set_xlim(-3, 113); ax.set_ylim(-3, 109); ax.set_aspect('equal'); ax.axis('off')
-    ax.set_title(f'{name}\n{desc}', fontsize=11, fontweight='bold')
+    for ax, psi, label in ((axs[0], 180, f'{name}: zu (Karte)'), (axs[1], 135, 'offen (Biss)')):
+        move = (lambda g: grip_pose(grip_unpose(g), 0, psi))
+        draw(ax, s['frame'], base[0], edge='#777')
+        draw(ax, grip_pose(s['grip'], 0, psi), base[1], edge='#777')
+        draw(ax, Point(KNOB).buffer(3.2), base[2])
+        for c, g in a['frame']:
+            draw(ax, g, c or '#000000', 1 if c else 0.5)
+        for c, g in a['grip']:
+            draw(ax, move(g), c or '#000000', 1 if c else 0.5)
+        ax.set_xlim(-48, 72) if psi != 180 else ax.set_xlim(-26, 94); ax.set_ylim(-40, 108); ax.set_aspect('equal'); ax.axis('off')
+        ax.set_title(label, fontsize=13, fontweight='bold' if psi == 180 else 'normal', loc='left')
+    axs[0].text(0, -0.02, desc, transform=axs[0].transAxes, fontsize=11, va='top')
 
 
 if __name__ == '__main__':
@@ -251,10 +234,10 @@ if __name__ == '__main__':
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     if sys.argv[1] == 'sheet':
-        fig, axs = plt.subplots(2, 3, figsize=(16, 11), facecolor='#eeeeee')
-        for ax, name in zip(axs.flat, DESIGNS):
-            render(name, ax)
-        fig.text(0.5, 0.01, 'links Rahmen, rechts Griff (Außenseite)  |  Farbe = Inlay 0,6 mm  |  dunkle Linien = fühlbare Rillen',
-                 ha='center', fontsize=11)
-        plt.tight_layout(rect=(0, 0.03, 1, 1))
-        plt.savefig(sys.argv[2], dpi=110)
+        fig, axs = plt.subplots(3, 4, figsize=(16, 19), facecolor='#ececec')
+        for i, name in enumerate(DESIGNS):
+            render(name, axs[i // 2, (i % 2) * 2:(i % 2) * 2 + 2])
+        fig.text(0.5, 0.01, 'Außenansicht  |  Zähne = echte Geometrie am Rahmen, Taschen im Griff aus der Schwenkbewegung berechnet  |  '
+                 'Farbe = Inlay 0,6 mm  |  dunkle Linien = fühlbare Rillen', ha='center', fontsize=11)
+        plt.subplots_adjust(left=0.01, right=0.99, top=0.97, bottom=0.04, wspace=0.02, hspace=0.12)
+        plt.savefig(sys.argv[2], dpi=100)
