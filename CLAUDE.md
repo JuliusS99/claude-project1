@@ -5,6 +5,7 @@
 - Spannweite Sci-Fi bis Fantasy, gern „tactical“ (fühlbare Strukturen), Farbaufteilung für Mehrfarbdruck.
 - Body darf verändert werden, wo es Funktion und Stabilität nicht betrifft.
 - Erst Vorschläge mit Bild zeigen, dann bauen.
+- Muss **druckbar** bleiben (A1, 0,4er Düse) und das **Grunddesign der Karte** darf nicht kaputtgehen (Kontur/Dicke gleich). `moshu/tools/build.py` prüft das automatisch, Designs nur ausliefern, wenn alle Checks OK sind.
 
 ## Moshu Slingshot – Fakten
 - Originalteile sind nicht im Repo (öffentlich, fremde Lizenz) → `moshu/parts/` ist gitignored, per `moshu/tools/extract_3mf.py` erzeugen.

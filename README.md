@@ -25,15 +25,30 @@ Flach liegend drucken, 100 % Infill oder ≥ 5 Wände, PETG oder PA-CF statt PLA
 
 ---
 
-# Moshu Card Slingshot – Designs
+# Moshu Card Slingshot – Biss-Designs
 
-Farb- und Haptik-Designs für die [Moshu Card-Style Slingshot](https://makerworld.com/de/models/3087259) (Original-Geometrie vom Designer, **nicht** in diesem Repo).
+Farb- und Biss-Designs für die [Moshu Card-Style Slingshot](https://makerworld.com/de/models/3087259). Die Original-Geometrie stammt vom Designer und ist **nicht** in diesem Repo.
 
-1. Die 3MF bei MakerWorld herunterladen.
-2. `python3 moshu/tools/extract_3mf.py <datei>.3mf moshu/parts` (benötigt `numpy`). Das erzeugt die einzelnen STLs, die lokal bleiben.
-3. Konzeptblatt: `python3 moshu/tools/designs.py sheet moshu/designs/concepts.png` (benötigt `trimesh shapely scipy matplotlib`).
+Beim Aufklappen schwenkt der Griff an einem Verbindungsglied weg, und die Kante zwischen Rahmen und Griff öffnet sich wie ein Kiefer. Am Rahmen sitzen echte Zähne. Die passenden Taschen im Griff werden aus der Schwenkbewegung berechnet.
 
 ![Konzepte](moshu/designs/concepts.png)
 
-Teile: `frame` (Rahmen), `grip` (Griff mit Kugelkanal), `slider` (Schlitten/Abzug), `spring` (Druckfeder), `cover_plate`, `nut_plate` (2× M3-Mutter), `screw_plate` (2× M3-Senkkopf), `knob` (Knopf mit Öse).
-Original-Druckprofil: Bambu Lab A1, 0,2 mm, 3 Wände, 40 % Infill, ohne Stützen.
+## Bauen
+```
+pip install numpy trimesh shapely scipy matplotlib manifold3d rtree networkx
+python3 moshu/tools/extract_3mf.py <MakerWorld-Download>.3mf moshu/parts
+python3 moshu/tools/build.py all        # oder z. B.: build.py MAW
+```
+Ergebnis in `moshu/out/<design>/` (gitignored): STLs pro Teil und Farbe, `checks.txt` und `preview.png`.
+
+`build.py` bricht mit Fehler ab, wenn eine Prüfung scheitert:
+- **Karte:** Außenkontur und Dicke unverändert, nichts steht über.
+- **Druckbar:** keine Details oder Wände unter 0,8 mm, Rillen überbrückbar, alle Netze wasserdicht (so geprüft, wie ein Slicer die STL liest).
+- **Funktion:** Die Zähne ragen nicht ins Abzugsfenster, und der Griff klappt von der Karte frei bis in die Pistolenstellung.
+
+## In Bambu Studio
+1. Alle STLs eines Teils gleichzeitig öffnen (z. B. `frame_*.stl`) und „als ein Objekt mit mehreren Teilen laden?“ mit **Ja** beantworten.
+2. Jedem Teil das Filament aus `checks.txt` zuweisen.
+3. Die Außenseite liegt bereits unten auf dem Bett. Farbwechsel gibt es nur in den ersten 3 Schichten.
+
+Unverändert aus dem Original drucken: `slider`, `spring`, `cover_plate`, `nut_plate`, `screw_plate`, `knob` (der Knopf in der Augenfarbe). Dazu 2× M3-Senkkopfschraube und 2× M3-Mutter.

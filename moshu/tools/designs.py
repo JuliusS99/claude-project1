@@ -25,7 +25,9 @@ from shapely.ops import unary_union
 PARTS = Path(__file__).resolve().parent.parent / 'parts'
 A, LINK, GB = np.array([28.0, 6.0]), 12.2, (28.0, 69.0)  # frame pivot, link length, grip pivot (grip coords)
 MOUTH_X, MOUTH_Y = 34.0, (14.0, 54.0)                      # straight part of the seam that gets teeth
-OPEN_PATH = np.linspace(180, 140, 21)                       # grip angle while unfolding (link at 0 deg)
+OPEN_PATH = np.linspace(180, 140, 81)                       # grip angle while unfolding (link at 0 deg)
+MIN_W = 0.8          # smallest printable feature: two 0.4 mm nozzle lines
+CLEARANCE = 0.3      # gap between teeth and sockets
 
 
 def _slice(m, z):
@@ -56,14 +58,14 @@ def grip_unpose(g, phi=0.0, psi=180.0):
 # ---------- teeth (frame side, card coords) ----------
 def teeth(style, rng):
     y0, y1 = MOUTH_Y
-    x = MOUTH_X - 0.6  # root overlaps the frame edge
+    x = MOUTH_X - 1.0  # root overlaps the frame edge (clipped again in build_shapes)
     out = []
     if style == 'square':
         for y in np.arange(y0, y1 - 3, 7.0):
             out.append(box(x, y, MOUTH_X + 3.5, y + 3.5))
         return out
     pitch, h, w = {'fang': (5.7, 4.2, 5.0), 'serrated': (3.4, 2.6, 3.2), 'saw': (6.6, 4.6, 6.4),
-                   'mimic': (5.0, 4.0, 4.6), 'cilia': (4.0, 5.2, 1.5)}[style]
+                   'mimic': (5.0, 4.0, 4.6), 'cilia': (4.0, 5.2, 2.2)}[style]
     for y in np.arange(y0, y1 - w + 0.01, pitch):
         hh, ww = h, w
         if style == 'mimic':
@@ -80,15 +82,37 @@ def teeth(style, rng):
     return out
 
 
+def printable(g, w=MIN_W):
+    """Fill gaps and drop features narrower than w (closing, then opening)."""
+    r = w / 2
+    return g.buffer(r).buffer(-2 * r).buffer(r)
+
+
+def sweep(T, path):
+    """Area a tooth set covers in grip coords while the grip moves along `path` (convex hull per step)."""
+    parts = []
+    for tooth in getattr(T, 'geoms', [T]):
+        poses = [grip_unpose(tooth, 0, psi) for psi in path]
+        parts += [unary_union([a, b]).convex_hull for a, b in zip(poses, poses[1:])]
+    return unary_union(parts)
+
+
 def build_shapes(style, rng):
     frame, frame_safe = load('frame')
     grip, grip_safe = load('grip')
-    T = unary_union(teeth(style, rng))
-    sockets = unary_union([grip_unpose(T, 0, psi) for psi in OPEN_PATH]).buffer(0.3)  # grip coords
+    T = unary_union(teeth(style, rng)).buffer(-0.5).buffer(0.5)        # round tips, >= 1 mm
+    T = T.intersection(box(MOUTH_X - 0.7, -10, MOUTH_X + 20, 120))     # root covers the edge fillet, 0.3 mm short of the trigger window
+    sockets = sweep(T, OPEN_PATH).buffer(CLEARANCE)                    # grip coords
     grip_new = grip.difference(sockets)
-    return {'frame': frame.union(T), 'frame_safe': frame_safe, 'teeth': T,
+    slivers = grip_new.difference(grip_new.buffer(-0.45).buffer(0.45)).intersection(sockets.buffer(1.5))
+    zone = sockets.buffer(1.5)
+    grip_cut = unary_union([sockets, slivers]).buffer(0.05).intersection(zone)  # also eats micron-thin residue
+    grip_new = grip.difference(grip_cut)                               # no walls thinner than 0.9 mm
+    zone = box(MOUTH_X, MOUTH_Y[0] - 1.5, MOUTH_X + 20, MOUTH_Y[1] + 1)
+    x_end = grip_pose(grip_cut).intersection(zone).bounds[2] + 1.0  # teeth colour ends 1 mm past the deepest socket
+    return {'frame': frame.union(T), 'frame_safe': frame_safe, 'teeth': T, 'grip_cut': grip_cut,
             'grip': grip_new, 'grip_safe': grip_safe.intersection(grip_new.buffer(-1.0)),
-            'grip_teeth': grip_pose(grip_new).intersection(box(MOUTH_X, MOUTH_Y[0] - 2, MOUTH_X + 5, MOUTH_Y[1] + 2))}
+            'grip_teeth': grip_pose(grip_new).intersection(box(MOUTH_X, zone.bounds[1], x_end, zone.bounds[3]))}
 
 
 # ---------- art helpers ----------
@@ -129,21 +153,21 @@ BALLS = [(45.9, 53.7), (45.9, 43.7), (45.9, 33.7)]  # ammo holes in card pose
 # ---------- designs: art in card coords; None colour = tactile groove ----------
 def maw(s, rng):
     gums = box(38.6, 11, 42.6, 57)
-    return {'frame': [('#ffcc00', ring(KNOB, 5.6, 2.6)), ('#7a0c14', voronoi(box(34, 75, 68, 106), rng, 14, 0.7)),
+    return {'frame': [('#ffcc00', ring(KNOB, 5.6, 2.6)), ('#7a0c14', voronoi(box(34, 75, 68, 106), rng, 14, 0.9)),
                       ('#efe6d2', s['teeth'])],
             'grip': [('#a4161a', gums), ('#efe6d2', s['grip_teeth']),
-                     (None, unary_union([wave(36, 66, y, 1.2, 3, 0.8) for y in range(10, 70, 6)]))]}
+                     (None, unary_union([wave(36, 66, y, 1.2, 3, 0.9) for y in range(10, 70, 6)]))]}
 
 
 def megalodon(s, rng):
     gills = lines([[(14 + k * 4.5, 9), (16.5 + k * 4.5, 18), (14 + k * 4.5, 27)] for k in range(4)], 1.0)
     return {'frame': [('#efefef', s['teeth']), (None, gills), ('#0a0a0a', Point(55, 93).buffer(3.2)),
-                      ('#ffffff', Point(54, 94.2).buffer(0.9)), (None, lines([[(40, 100), (47, 97)], [(41, 103), (49, 99.5)]], 0.7))],
-            'grip': [(None, lines([[(37, 64), (48, 70)], [(37, 60), (50, 67)]], 0.7))]}
+                      ('#ffffff', Point(54, 94.2).buffer(0.9)), (None, lines([[(40, 100), (47, 97)], [(41, 103), (49, 99.5)]], 0.9))],
+            'grip': [(None, lines([[(37, 64), (48, 70)], [(37, 60), (50, 67)]], 0.9))]}
 
 
 def mimic(s, rng):
-    planks = unary_union([box(-5, y, 75, y + 0.8) for y in range(4, 106, 8)])
+    planks = unary_union([box(-5, y, 75, y + 1.0) for y in range(4, 106, 8)])
     keyhole = unary_union([Point(51, 89).buffer(1.7), box(50.3, 83.5, 51.7, 89)])
     tongue = unary_union([LineString([(35, 20), (38, 30), (36.5, 40), (39.5, 48)]).buffer(2.4)])
     return {'frame': [(None, planks), ('#d4af37', box(44, 81, 58, 97).difference(keyhole)),
@@ -154,15 +178,15 @@ def mimic(s, rng):
 def flytrap(s, rng):
     inside = unary_union([box(34, 8, 43, 60), box(24, 6, 34, 30)])
     veins = lines([[(34, y), (34 + 12 * cos(a), y + 12 * sin(a))] for y in range(12, 58, 7) for a in (-0.4, 0, 0.4)]
-                  + [[(34, y), (34 - 10, y + d)] for y, d in ((10, -3), (18, 0), (26, 3))], 0.6)
+                  + [[(34, y), (34 - 10, y + d)] for y, d in ((10, -3), (18, 0), (26, 3))], 0.9)
     return {'frame': [('#c1121f', box(24, 6, 34, 30)), ('#d9ed92', s['teeth']),
-                      ('#80b918', voronoi(box(34, 75, 68, 106), rng, 10, 0.6)), (None, veins)],
+                      ('#80b918', voronoi(box(34, 75, 68, 106), rng, 10, 0.9)), (None, veins)],
             'grip': [('#c1121f', box(34, 8, 43, 60)), ('#80b918', veins), ('#e0fbfc', dots(inside, rng, 10, (0.5, 0.9)))]}
 
 
 def croc9(s, rng):
-    scutes = unary_union([box(-5, y, 75, y + 0.7) for y in range(3, 106, 7)] + [box(x, -5, x + 0.7, 110) for x in range(5, 70, 8)])
-    piston = lines([[(13, 12), (31, 12)], [(13, 22), (31, 22)], [(13, 12), (13, 22)], [(31, 17), (33, 17)]], 0.8)
+    scutes = unary_union([box(-5, y, 75, y + 1.0) for y in range(3, 106, 7)] + [box(x, -5, x + 1.0, 110) for x in range(5, 70, 8)])
+    piston = lines([[(13, 12), (31, 12)], [(13, 22), (31, 22)], [(13, 12), (13, 22)], [(31, 17), (33, 17)]], 0.9)
     return {'frame': [(None, scutes.intersection(box(34, 75, 68, 106))), ('#ff2a2a', slit_eye(KNOB, 6.5, True)),
                       ('#c9d1d9', s['teeth']), (None, piston),
                       ('#ff7a00', box(36, 99, 66, 105).difference(unary_union([box(36 + k, 98, 38 + k, 106) for k in range(0, 30, 4)])))],
@@ -170,13 +194,13 @@ def croc9(s, rng):
 
 
 def beartrap(s, rng):
-    chain = unary_union([ring((12 + (k % 2) * 0, 12 + k * 4.5), 2.2, 0.8) for k in range(4)])
+    chain = unary_union([ring((12, 12 + k * 4.5), 2.2, 0.9) for k in range(4)])
     hazard = box(34, 60, 68, 66)
     rivets = unary_union([Point(p).buffer(1.1) for p in ((38, 79), (66, 79), (38, 102), (66, 102))])
     return {'frame': [('#b8c1c8', s['teeth']), (None, chain), ('#b8c1c8', rivets),
-                      ('#8a3b12', dots(box(34, 75, 68, 106), rng, 12, (0.4, 1.0)))],
+                      ('#8a3b12', dots(box(34, 75, 68, 106), rng, 12, (0.5, 1.0)))],
             'grip': [('#b8c1c8', s['grip_teeth']), ('#ffd000', hazard.difference(unary_union([box(34 + k, 58, 36 + k, 68) for k in range(0, 34, 4)]))),
-                     (None, ring((40.2, 6), 4.5, 0.8))]}
+                     (None, ring((40.2, 6), 4.5, 0.9))]}
 
 
 DESIGNS = {  # name: (art fn, tooth style, (frame, grip, knob) base colours, one-liner)
@@ -195,9 +219,21 @@ def art(name, seed=3):
     s = build_shapes(style, rng)
     a = fn(s, rng)
     gsafe = grip_pose(s['grip_safe'])
-    clip = {'frame': lambda g, c: g.intersection(s['frame_safe'].union(s['teeth']) if c else s['frame_safe']),
-            'grip': lambda g, c: g.intersection(gsafe.union(s['grip_teeth']) if c else gsafe)}
-    return s, base, desc, {p: [(c, clip[p](g, c)) for c, g in a[p]] for p in a}
+    # only the tooth colour itself may run up to the teeth/sockets; everything else stays in the safe zone
+    clip = {'frame': lambda g: g if g is s['teeth'] else g.intersection(s['frame_safe']),
+            'grip': lambda g: g if g is s['grip_teeth'] else g.intersection(gsafe)}
+    out = {}
+    for p in a:
+        layers = [(c, printable(clip[p](g))) for c, g in a[p]]
+        grooves = unary_union([g for c, g in layers if c is None])
+        colours = [(c, g) for c, g in layers if c]  # grooves are cut in 3D, deeper than the inlays
+        for i in range(len(colours)):  # later colours cover earlier ones -> disjoint inlays
+            later = unary_union([g for _, g in colours[i + 1:]])
+            colours[i] = (colours[i][0], printable(colours[i][1].difference(later)))
+        # tactile grooves keep 1 mm off colour inlays: cleaner look, no near-touching cut walls
+        grooves = printable(grooves.difference(unary_union([g for _, g in colours]).buffer(1.0)))
+        out[p] = [(c, g) for c, g in colours if not g.is_empty] + ([(None, grooves)] if not grooves.is_empty else [])
+    return s, base, desc, out
 
 
 def render(name, axs):

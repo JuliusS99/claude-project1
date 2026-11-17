@@ -1,3 +1,4 @@
 moshu/parts/
 *.3mf
 __pycache__/
+moshu/out/
